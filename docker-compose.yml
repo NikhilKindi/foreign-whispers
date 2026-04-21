@@ -50,8 +50,6 @@ services:
               capabilities: [gpu]
 
   # ── API (CPU orchestrator) — all profiles ─────────────────────────
-  # The API container is CPU-only. It delegates GPU work to the STT
-  # and TTS containers above via HTTP.
   api:
     container_name: foreign-whispers-api
     profiles: [nvidia, cpu]
@@ -62,7 +60,9 @@ services:
         USER_UID: "${UID:-1000}"
         USER_GID: "${GID:-1000}"
     restart: unless-stopped
-    network_mode: host
+    # network_mode: host   ← commented out for Windows
+    ports:
+      - "8080:8080"        
     command: ["uv", "run", "uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8080"]
     environment:
       - CHATTERBOX_API_URL=http://localhost:8020
@@ -71,9 +71,11 @@ services:
       - ./pipeline_data:/app/pipeline_data
       - ./foreign_whispers:/app/foreign_whispers
       - ./api:/app/api
-      - ./cookies.txt:/app/cookies.txt
-
+      #- ./cookies.txt:/app/cookies.txt
+    networks:
+      - fw-network
   # ── Frontend (Next.js) — all profiles ──────────────────────────────
+  
   frontend:
     container_name: foreign-whispers-frontend
     profiles: [nvidia, cpu]
@@ -81,17 +83,25 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     restart: unless-stopped
-    network_mode: host
+    # network_mode: host
+    ports:
+      - "8501:8501"
     environment:
-      - API_URL=http://localhost:8080
+      - API_URL=http://foreign-whispers-api:8080
       - HOSTNAME=0.0.0.0
       - PORT=8501
+    networks:
+      - fw-network
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8501"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 15s
+
+networks:
+  fw-network: 
+    driver: bridge
 
 volumes:
   whisper-cache:

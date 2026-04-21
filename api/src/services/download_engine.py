@@ -12,13 +12,10 @@ from youtube_transcript_api import YouTubeTranscriptApi
 _COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "/app/cookies.txt")
 
 def _yt_dlp_opts(**extra):
-    """Base yt-dlp options. Cookies are optional — yt-dlp works without them
-    by using alternative YouTube clients (Android VR) that bypass n-challenge."""
     opts = {"quiet": True, "no_warnings": True}
-    if pathlib.Path(_COOKIES_FILE).exists():
-        opts["cookiefile"] = _COOKIES_FILE
     opts.update(extra)
     return opts
+    
 
 
 def create_folder(folder_name):
