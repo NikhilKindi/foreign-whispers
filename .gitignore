@@ -165,7 +165,8 @@ audios/
 captions/
 output_logs/
 data/transcriptions/
-pipeline_data/
+pipeline_data/*
+!pipeline_data/speakers/
 
 # Django runtime (removed, kept for safety)
 whispers/
@@ -201,3 +202,6 @@ whisper_models/
 
 # Verification screenshots (transient)
 *-verify.png
+
+# Beads archive (migrated to Jira 2026-04-13)
+.beads-archive.zip
