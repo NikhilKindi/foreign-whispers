@@ -20,7 +20,8 @@ class AlignmentService:
 
     def diarize(self, audio_path: str) -> list[dict]:
         """Return [{start_s, end_s, speaker}]. Empty list if pyannote absent or no token."""
-        return diarize_audio(audio_path, hf_token=self._settings.hf_token or None)
+        token = (self._settings.hf_token or "").strip() or None
+        return diarize_audio(audio_path, hf_token=token)
 
     def evaluate_clip(self, metrics: list, aligned: list) -> dict:
         """Return a clip evaluation report dict."""

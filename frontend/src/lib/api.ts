@@ -59,12 +59,14 @@ export async function translateVideo(
 export async function synthesizeSpeech(
   videoId: string,
   config: string,
-  alignment: boolean = false
+  alignment: boolean = false,
+  speakerWav?: string
 ): Promise<TTSResponse> {
-  return fetchJson<TTSResponse>(
-    `/api/tts/${videoId}?config=${config}&alignment=${alignment}`,
-    { method: "POST" }
-  );
+  let url = `/api/tts/${videoId}?config=${config}&alignment=${alignment}`;
+  if (speakerWav) {
+    url += `&speaker_wav=${encodeURIComponent(speakerWav)}`;
+  }
+  return fetchJson<TTSResponse>(url, { method: "POST" });
 }
 
 export async function stitchVideo(

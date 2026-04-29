@@ -194,7 +194,7 @@ export function usePipeline() {
     try {
       const dl = await run("download", () => downloadVideo(video.url));
       await run("transcribe", () => transcribeVideo(dl.video_id, settings.useYoutubeCaptions));
-      if (settings.diarization.length > 0) {
+      if (settings.diarization.length > 0 || settings.voiceCloning.length > 0) {
         await run("diarize", () => diarizeVideo(dl.video_id));
       }
       await run("translate", () => translateVideo(dl.video_id, "es"));
@@ -204,7 +204,8 @@ export function usePipeline() {
       for (const cfg of configs) {
         dispatch({ type: "SELECT_VARIANT", variantId: makeVariantId(video.id, cfg.id) });
         const alignment = cfg.dubbing === "aligned";
-        await run("tts", () => synthesizeSpeech(dl.video_id, cfg.id, alignment));
+        const speakerWav = cfg.voiceCloning === "chatterbox" ? "es/default.wav" : undefined;
+        await run("tts", () => synthesizeSpeech(dl.video_id, cfg.id, alignment, speakerWav));
         await run("stitch", () => stitchVideo(dl.video_id, cfg.id));
       }
 

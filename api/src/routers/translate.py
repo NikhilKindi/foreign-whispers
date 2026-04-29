@@ -30,18 +30,26 @@ async def translate_endpoint(
 
     out_path = out_dir / f"{title}.json"
 
-    # Skip if already translated
+    src_path = raw_dir / f"{title}.json"
+    transcript = json.loads(src_path.read_text())
+
+    # Skip if already translated — but propagate speaker labels from transcription
     if out_path.exists():
         data = json.loads(out_path.read_text())
+        src_segs = transcript.get("segments", [])
+        out_segs = data.get("segments", [])
+        if src_segs and out_segs and "speaker" in src_segs[0] and "speaker" not in out_segs[0]:
+            for i, seg in enumerate(out_segs):
+                if i < len(src_segs):
+                    seg["speaker"] = src_segs[i].get("speaker", "SPEAKER_00")
+            data["segments"] = out_segs
+            out_path.write_text(json.dumps(data))
         return {
             "video_id": video_id,
             "target_language": target_language,
             "text": data.get("text", ""),
             "segments": data.get("segments", []),
         }
-
-    src_path = raw_dir / f"{title}.json"
-    transcript = json.loads(src_path.read_text())
 
     _translation_service.install_language_pack("en", target_language)
     translated = _translation_service.translate_transcript(transcript, "en", target_language)
