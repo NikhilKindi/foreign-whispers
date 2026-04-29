@@ -8,4 +8,14 @@ superceded/
 docs/
 *.mov
 *.webm
+*.mp4
+*.wav
+*.mp3
 .env
+
+# Heavy dirs that are volume-mounted at runtime
+pipeline_data/
+frontend/
+notebooks/
+tests/
+*.ipynb

@@ -61,20 +61,33 @@ def stitch_audio(video_path: str, audio_path: str, output_path: str):
     """Replace video audio track with the dubbed audio using ffmpeg remux.
 
     Uses -c:v copy to avoid re-encoding video frames — instant and lossless.
+    Output duration is capped to the source video length via -t.
     """
     import subprocess
 
     print("Stitching audio (ffmpeg remux)...")
     pathlib.Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
+    # Get source video duration to cap the output
+    probe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "csv=p=0", video_path],
+        capture_output=True, text=True,
+    )
+    duration_flag = []
+    if probe.returncode == 0 and probe.stdout.strip():
+        duration_flag = ["-t", probe.stdout.strip()]
+
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
         "-i", audio_path,
-        "-c:v", "copy",        # copy video stream without re-encoding
-        "-map", "0:v:0",       # take video from first input
-        "-map", "1:a:0",       # take audio from second input
-        "-shortest",           # stop when shortest stream ends
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-ar", "44100",
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        *duration_flag,
         output_path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)

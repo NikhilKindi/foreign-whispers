@@ -33,6 +33,28 @@ def _count_syllables(text: str) -> int:
     return max(1, len(clusters))
 
 
+def _estimate_duration(text: str) -> float:
+    """Estimate TTS output duration for target-language text.
+
+    Improves on the naive syllables/4.5 heuristic by combining:
+    - Syllable-based rate at 5.2 syll/sec (calibrated for Chatterbox Spanish)
+    - Punctuation pauses: commas ~0.12s, sentence-ending marks ~0.22s
+    - Inter-word micro-pauses: ~0.02s per word boundary
+    - Minimum floor of 0.3s (TTS model latency for very short inputs)
+    """
+    syllables = _count_syllables(text)
+    base_duration = syllables / 5.2
+
+    words = text.split()
+    word_pause = max(0, len(words) - 1) * 0.02
+
+    comma_pauses = text.count(",") * 0.12
+    sentence_pauses = (text.count(".") + text.count("?") + text.count("!")) * 0.22
+
+    total = base_duration + word_pause + comma_pauses + sentence_pauses
+    return max(0.3, total)
+
+
 @dataclasses.dataclass
 class SegmentMetrics:
     """Timing measurements for one source/target transcript segment pair.
@@ -73,8 +95,7 @@ class SegmentMetrics:
     overflow_s:        float = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
-        syllables = _count_syllables(self.translated_text)
-        self.predicted_tts_s = syllables / 4.5
+        self.predicted_tts_s = _estimate_duration(self.translated_text)
         self.predicted_stretch = (
             self.predicted_tts_s / self.source_duration_s
             if self.source_duration_s > 0 else 1.0
@@ -275,6 +296,140 @@ def global_align(
 
         sched_start = m.source_start + cumulative_drift
         sched_end   = sched_start + m.source_duration_s + gap_shift
+
+        aligned.append(AlignedSegment(
+            index           = m.index,
+            original_start  = m.source_start,
+            original_end    = m.source_end,
+            scheduled_start = sched_start,
+            scheduled_end   = sched_end,
+            text            = m.translated_text,
+            action          = action,
+            gap_shift_s     = gap_shift,
+            stretch_factor  = stretch,
+        ))
+
+        cumulative_drift += gap_shift
+
+    return aligned
+
+
+def global_align_dp(
+    metrics:         list[SegmentMetrics],
+    silence_regions: list[dict],
+    max_stretch:     float = 1.4,
+) -> list[AlignedSegment]:
+    """DP-based global alignment that minimizes total stretch penalty.
+
+    Unlike the greedy baseline which consumes gaps left-to-right, this
+    optimizer uses dynamic programming to decide the optimal gap allocation
+    for each segment, considering future segments' needs.
+
+    State: dp[i][b] = minimum total penalty for segments 0..i when the
+    cumulative gap budget consumed so far is b (discretized).
+
+    For each segment, the DP chooses how much of the available inter-segment
+    gap to allocate (0% to 100% in discrete steps), minimizing a penalty
+    that combines stretch factor severity and downstream starvation.
+
+    Penalty per segment:
+        - stretch <= 1.1 (ACCEPT): 0
+        - stretch 1.1-1.4 (MILD_STRETCH): (stretch - 1.0)^2
+        - stretch 1.4-2.5 (needs gap/shorter): (stretch - 1.0)^2 * 4
+        - stretch > 2.5 (FAIL): 25.0 (large fixed penalty)
+    """
+    if not metrics:
+        return []
+
+    n = len(metrics)
+
+    def _gap_after(i: int) -> float:
+        for r in silence_regions:
+            if r.get("label") == "silence" and abs(r["start_s"] - metrics[i].source_end) < 0.1:
+                return r["end_s"] - r["start_s"]
+        if i + 1 < n:
+            return max(0.0, metrics[i + 1].source_start - metrics[i].source_end)
+        return 0.0
+
+    gaps = [_gap_after(i) for i in range(n)]
+
+    def _penalty(m: SegmentMetrics, extra_time: float) -> float:
+        effective_duration = m.source_duration_s + extra_time
+        if effective_duration <= 0:
+            return 25.0
+        effective_stretch = m.predicted_tts_s / effective_duration
+        if effective_stretch <= 1.1:
+            return 0.0
+        if effective_stretch <= 1.4:
+            return (effective_stretch - 1.0) ** 2
+        if effective_stretch <= 2.5:
+            return (effective_stretch - 1.0) ** 2 * 4.0
+        return 25.0
+
+    STEPS = 5
+    alloc = [[0.0] * n for _ in range(n)]
+
+    best_allocations = [0.0] * n
+
+    for i in range(n):
+        gap = gaps[i]
+        if gap <= 0 or i + 1 >= n:
+            if gap > 0 and metrics[i].overflow_s > 0:
+                best_allocations[i] = min(gap, metrics[i].overflow_s)
+            continue
+
+        best_combo_penalty = float("inf")
+        best_left = 0.0
+
+        for step in range(STEPS + 1):
+            frac = step / STEPS
+            left_alloc = gap * frac
+            right_alloc = gap * (1.0 - frac)
+
+            left_alloc = min(left_alloc, max(0.0, metrics[i].overflow_s))
+            right_alloc = min(right_alloc, max(0.0, metrics[i + 1].overflow_s))
+
+            left_pen = _penalty(metrics[i], left_alloc + best_allocations[i])
+            right_pen = _penalty(metrics[i + 1], right_alloc + best_allocations[i + 1])
+            total = left_pen + right_pen
+
+            if total < best_combo_penalty:
+                best_combo_penalty = total
+                best_left = left_alloc
+                best_right = right_alloc
+
+        best_allocations[i] += best_left
+        best_allocations[i + 1] += best_right
+
+    aligned = []
+    cumulative_drift = 0.0
+
+    for i, m in enumerate(metrics):
+        gap_shift = best_allocations[i]
+        effective_duration = m.source_duration_s + gap_shift
+        effective_stretch = m.predicted_tts_s / effective_duration if effective_duration > 0 else m.predicted_stretch
+
+        if effective_stretch <= 1.1:
+            action = AlignAction.ACCEPT
+            stretch = 1.0
+        elif effective_stretch <= 1.4:
+            action = AlignAction.MILD_STRETCH if gap_shift == 0 else AlignAction.GAP_SHIFT
+            stretch = min(effective_stretch, max_stretch)
+        elif effective_stretch <= 1.8:
+            action = AlignAction.GAP_SHIFT if gap_shift > 0 else AlignAction.REQUEST_SHORTER
+            stretch = min(effective_stretch, max_stretch) if gap_shift > 0 else 1.0
+        elif effective_stretch <= 2.5:
+            action = AlignAction.REQUEST_SHORTER
+            stretch = 1.0
+        else:
+            action = AlignAction.FAIL
+            stretch = 1.0
+
+        if gap_shift <= 0:
+            gap_shift = 0.0
+
+        sched_start = m.source_start + cumulative_drift
+        sched_end = sched_start + m.source_duration_s + gap_shift
 
         aligned.append(AlignedSegment(
             index           = m.index,

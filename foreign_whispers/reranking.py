@@ -96,6 +96,171 @@ def analyze_failures(report: dict) -> FailureAnalysis:
     )
 
 
+_PHRASE_CONTRACTIONS: list[tuple[str, str]] = [
+    ("en este momento", "ahora"),
+    ("con el fin de", "para"),
+    ("a pesar de que", "aunque"),
+    ("con respecto a", "sobre"),
+    ("en relación con", "sobre"),
+    ("por lo tanto", "así que"),
+    ("sin embargo", "pero"),
+    ("a través de", "por"),
+    ("debido a que", "porque"),
+    ("con el objetivo de", "para"),
+    ("en la actualidad", "hoy"),
+    ("de acuerdo con", "según"),
+    ("por medio de", "por"),
+    ("en el caso de", "si"),
+    ("a lo largo de", "durante"),
+    ("en primer lugar", "primero"),
+    ("en segundo lugar", "segundo"),
+    ("con la finalidad de", "para"),
+    ("en la medida en que", "mientras"),
+    ("por otra parte", "además"),
+    ("en lo que respecta a", "sobre"),
+    ("a causa de", "por"),
+    ("es decir", "o sea"),
+    ("al mismo tiempo", "a la vez"),
+    ("de todas maneras", "igual"),
+    ("por supuesto", "claro"),
+    ("tiene que", "debe"),
+    ("va a ser", "será"),
+    ("vamos a", "vamos"),
+]
+
+_FILLER_WORDS = [
+    "realmente", "básicamente", "simplemente", "actualmente",
+    "literalmente", "absolutamente", "definitivamente", "obviamente",
+    "esencialmente", "particularmente", "ciertamente",
+]
+
+CHARS_PER_SECOND = 15.0
+
+
+def _rule_based_shorten(text: str) -> tuple[str, str]:
+    """Apply phrase contractions and filler removal. Returns (shortened, rationale)."""
+    import re
+    result = text
+    changes: list[str] = []
+
+    for long, short in _PHRASE_CONTRACTIONS:
+        pattern = re.compile(re.escape(long), re.IGNORECASE)
+        if pattern.search(result):
+            result = pattern.sub(short, result)
+            changes.append(f"'{long}'→'{short}'")
+
+    for filler in _FILLER_WORDS:
+        pattern = re.compile(r"\b" + re.escape(filler) + r"\b\s*", re.IGNORECASE)
+        if pattern.search(result):
+            result = pattern.sub("", result)
+            changes.append(f"removed '{filler}'")
+
+    result = re.sub(r"\s{2,}", " ", result).strip()
+    rationale = "rule-based: " + ", ".join(changes) if changes else "no rules applied"
+    return result, rationale
+
+
+def _argos_retranslate(source_text: str) -> tuple[str, str]:
+    """Simplify the English source, then re-translate with argostranslate."""
+    import re
+    simplified = source_text
+    simplified = re.sub(
+        r"\b(really|basically|actually|simply|literally|absolutely|"
+        r"definitely|obviously|essentially|particularly|certainly|"
+        r"just|very|quite|rather|somewhat|incredibly)\b\s*",
+        "", simplified, flags=re.IGNORECASE,
+    )
+    simplified = re.sub(r"\s{2,}", " ", simplified).strip()
+
+    if simplified == source_text or not simplified:
+        return "", "no simplification possible"
+
+    try:
+        import argostranslate.translate
+        retranslated = argostranslate.translate.translate(simplified, "en", "es")
+        return retranslated, "argos re-translation from simplified source"
+    except Exception as exc:
+        logger.warning("argos re-translation failed: %s", exc)
+        return "", f"argos failed: {exc}"
+
+
+_marian_model = None
+_marian_tokenizer = None
+
+
+def _marian_translate(source_text: str) -> tuple[str, str]:
+    """Translate English to Spanish using Helsinki-NLP/opus-mt-en-es (MarianMT).
+
+    Model is loaded once and cached for subsequent calls.
+    """
+    global _marian_model, _marian_tokenizer
+    try:
+        from transformers import MarianMTModel, MarianTokenizer
+    except ImportError:
+        return "", "transformers not installed"
+
+    model_name = "Helsinki-NLP/opus-mt-en-es"
+    try:
+        if _marian_tokenizer is None:
+            logger.info("Loading MarianMT model %s (one-time download)...", model_name)
+            _marian_tokenizer = MarianTokenizer.from_pretrained(model_name)
+            _marian_model = MarianMTModel.from_pretrained(model_name)
+            logger.info("MarianMT model loaded.")
+
+        tokens = _marian_tokenizer(source_text, return_tensors="pt", truncation=True)
+        translated = _marian_model.generate(**tokens)
+        result = _marian_tokenizer.decode(translated[0], skip_special_tokens=True)
+        return result, "MarianMT (Helsinki-NLP/opus-mt-en-es) translation"
+    except Exception as exc:
+        logger.warning("MarianMT translation failed: %s", exc)
+        return "", f"MarianMT failed: {exc}"
+
+
+def _truncate_to_budget(text: str, max_chars: int) -> tuple[str, str]:
+    """Truncate at the last sentence or clause boundary within budget."""
+    if len(text) <= max_chars:
+        return text, "already within budget"
+
+    import re
+    # Try sentence boundaries first
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    result = ""
+    for s in sentences:
+        candidate = (result + " " + s).strip() if result else s
+        if len(candidate) <= max_chars:
+            result = candidate
+        else:
+            break
+
+    if result and len(result) >= max_chars * 0.5:
+        return result, "truncated at sentence boundary"
+
+    # Fall back to clause boundaries
+    clauses = re.split(r"[,;:]\s+", text)
+    result = ""
+    for c in clauses:
+        candidate = (result + ", " + c).strip() if result else c
+        if len(candidate) <= max_chars:
+            result = candidate
+        else:
+            break
+
+    if result and len(result) >= max_chars * 0.3:
+        return result, "truncated at clause boundary"
+
+    # Last resort: word boundary
+    words = text.split()
+    result = ""
+    for w in words:
+        candidate = (result + " " + w).strip() if result else w
+        if len(candidate) <= max_chars:
+            result = candidate
+        else:
+            break
+
+    return result or text[:max_chars], "truncated at word boundary"
+
+
 def get_shorter_translations(
     source_text: str,
     baseline_es: str,
@@ -105,62 +270,119 @@ def get_shorter_translations(
 ) -> list[TranslationCandidate]:
     """Return shorter translation candidates that fit *target_duration_s*.
 
-    .. admonition:: Student Assignment — Duration-Aware Translation Re-ranking
+    Uses four independent strategies and returns all viable candidates
+    sorted shortest first:
 
-       This function is intentionally a **stub that returns an empty list**.
-       Your task is to implement a strategy that produces shorter
-       target-language translations when the baseline translation is too long
-       for the time budget.
+    1. **Rule-based** — Spanish filler word removal and phrase contraction.
+    2. **MarianMT** — independent translation via Helsinki-NLP/opus-mt-en-es.
+    3. **Argos re-translation** — simplify the English source text, then
+       re-translate via argostranslate for a naturally shorter output.
+    4. **Smart truncation** — cut at sentence/clause/word boundaries to
+       fit the character budget.
 
-       **Inputs**
-
-       ============== ======== ==================================================
-       Parameter      Type     Description
-       ============== ======== ==================================================
-       source_text    str      Original source-language segment text
-       baseline_es    str      Baseline target-language translation (from argostranslate)
-       target_duration_s float Time budget in seconds for this segment
-       context_prev   str      Text of the preceding segment (for coherence)
-       context_next   str      Text of the following segment (for coherence)
-       ============== ======== ==================================================
-
-       **Outputs**
-
-       A list of ``TranslationCandidate`` objects, sorted shortest first.
-       Each candidate has:
-
-       - ``text``: the shortened target-language translation
-       - ``char_count``: ``len(text)``
-       - ``brevity_rationale``: short note on what was changed
-
-       **Duration heuristic**: target-language TTS produces ~15 characters/second
-       (or ~4.5 syllables/second for Romance languages).  So a 3-second budget
-       ≈ 45 characters.
-
-       **Approaches to consider** (pick one or combine):
-
-       1. **Rule-based shortening** — strip filler words, use shorter synonyms
-          from a lookup table, contract common phrases
-          (e.g. "en este momento" → "ahora").
-       2. **Multiple translation backends** — call argostranslate with
-          paraphrased input, or use a second translation model, then pick
-          the shortest output that preserves meaning.
-       3. **LLM re-ranking** — use an LLM (e.g. via an API) to generate
-          condensed alternatives.  This was the previous approach but adds
-          latency, cost, and a runtime dependency.
-       4. **Hybrid** — rule-based first, fall back to LLM only for segments
-          that still exceed the budget.
-
-       **Evaluation criteria**: the caller selects the candidate whose
-       ``len(text) / 15.0`` is closest to ``target_duration_s``.
-
-    Returns:
-        Empty list (stub).  Implement to return ``TranslationCandidate`` items.
+    Duration heuristic: ~15 characters/second for Romance-language TTS.
     """
-    logger.info(
-        "get_shorter_translations called for %.1fs budget (%d chars baseline) — "
-        "returning empty list (student assignment stub).",
-        target_duration_s,
-        len(baseline_es),
+    max_chars = int(target_duration_s * CHARS_PER_SECOND)
+
+    if len(baseline_es) <= max_chars:
+        return []
+
+    candidates: list[TranslationCandidate] = []
+    seen_texts: set[str] = set()
+
+    # Strategy 1: rule-based shortening
+    try:
+        text, rationale = _rule_based_shorten(baseline_es)
+        if text and text != baseline_es and text not in seen_texts:
+            seen_texts.add(text)
+            candidates.append(TranslationCandidate(
+                text=text, char_count=len(text), brevity_rationale=rationale,
+            ))
+    except Exception as exc:
+        logger.warning("rule-based shortening failed: %s", exc)
+
+    # Strategy 2: MarianMT independent translation
+    try:
+        text, rationale = _marian_translate(source_text)
+        if text and text != baseline_es and text not in seen_texts:
+            seen_texts.add(text)
+            candidates.append(TranslationCandidate(
+                text=text, char_count=len(text), brevity_rationale=rationale,
+            ))
+    except Exception as exc:
+        logger.warning("MarianMT translation failed: %s", exc)
+
+    # Strategy 3: argos re-translation with simplified source
+    try:
+        text, rationale = _argos_retranslate(source_text)
+        if text and text != baseline_es and text not in seen_texts:
+            seen_texts.add(text)
+            candidates.append(TranslationCandidate(
+                text=text, char_count=len(text), brevity_rationale=rationale,
+            ))
+    except Exception as exc:
+        logger.warning("argos re-translation failed: %s", exc)
+
+    # Strategy 3: smart truncation (always produces a result within budget)
+    try:
+        best_input = min(
+            [baseline_es] + [c.text for c in candidates],
+            key=len,
+        )
+        text, rationale = _truncate_to_budget(best_input, max_chars)
+        if text and text not in seen_texts:
+            seen_texts.add(text)
+            candidates.append(TranslationCandidate(
+                text=text, char_count=len(text), brevity_rationale=rationale,
+            ))
+    except Exception as exc:
+        logger.warning("truncation failed: %s", exc)
+
+    candidates.sort(key=lambda c: c.char_count)
+    return candidates
+
+
+def pick_optimal_translation(
+    source_text: str,
+    baseline_es: str,
+    target_duration_s: float,
+    context_prev: str = "",
+    context_next: str = "",
+) -> TranslationCandidate:
+    """Pick the best translation for *target_duration_s*.
+
+    If the argostranslate baseline already fits the TTS budget, returns it
+    directly.  Otherwise runs all four shortening strategies via
+    ``get_shorter_translations`` and returns the shortest candidate that
+    fits, or the shortest overall if none fit.
+    """
+    max_chars = int(target_duration_s * CHARS_PER_SECOND)
+
+    if len(baseline_es) <= max_chars:
+        return TranslationCandidate(
+            text=baseline_es,
+            char_count=len(baseline_es),
+            brevity_rationale="argostranslate baseline (within budget)",
+        )
+
+    candidates = get_shorter_translations(
+        source_text=source_text,
+        baseline_es=baseline_es,
+        target_duration_s=target_duration_s,
+        context_prev=context_prev,
+        context_next=context_next,
     )
-    return []
+
+    if not candidates:
+        return TranslationCandidate(
+            text=baseline_es,
+            char_count=len(baseline_es),
+            brevity_rationale="no shorter candidate found, using baseline",
+        )
+
+    # Prefer candidates that fit the budget; among those pick the longest
+    # (closest to budget = least meaning lost). If none fit, pick shortest.
+    fitting = [c for c in candidates if c.char_count <= max_chars]
+    if fitting:
+        return max(fitting, key=lambda c: c.char_count)
+    return candidates[0]

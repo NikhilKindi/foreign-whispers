@@ -17,13 +17,21 @@ router = APIRouter(prefix="/api")
 _stitch_service = StitchService(ui_dir=settings.data_dir)
 
 
+def _truncate_line(text: str, max_chars: int = 42) -> str:
+    """Truncate text to max_chars at a word boundary."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars].rsplit(" ", 1)[0]
+    return cut + "..." if cut else text[:max_chars] + "..."
+
+
 def _segments_to_vtt(segments: list[dict]) -> str:
     """Convert transcript segments to rolling two-line WebVTT format.
 
     Mimics Google-style captions: each cue shows the current line on top
     and the previous line on the bottom, creating a smooth reading bridge.
+    Lines are capped at 42 characters to prevent visual wrapping.
     """
-    # Filter to non-empty segments first
     segs = [s for s in segments if s.get("text", "").strip()]
     if not segs:
         return "WEBVTT\n"
@@ -33,7 +41,7 @@ def _segments_to_vtt(segments: list[dict]) -> str:
     for i, seg in enumerate(segs, 1):
         start = _format_vtt_time(seg["start"])
         end = _format_vtt_time(seg["end"])
-        text = seg.get("text", "").strip()
+        text = _truncate_line(seg.get("text", "").strip())
         lines.append(str(i))
         lines.append(f"{start} --> {end}")
         if prev_text:
@@ -168,6 +176,7 @@ def _youtube_captions_to_vtt(caption_path: pathlib.Path) -> str:
     lines_out = ["WEBVTT", ""]
     prev_text: str | None = None
     for i, (start, end, text) in enumerate(segs, 1):
+        text = _truncate_line(text)
         lines_out.append(str(i))
         lines_out.append(f"{_format_vtt_time(start)} --> {_format_vtt_time(end)}")
         if prev_text:

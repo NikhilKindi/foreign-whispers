@@ -155,7 +155,7 @@ def _make_tts_engine():
     torch.load = _patched_load
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[tts] Using local Coqui TTS on {device}")
-    return CoquiTTS(model_name="tts_models/es/mai/tacotron2-DDC", progress_bar=False).to(device)
+    return CoquiTTS(model_name="tts_models/es/css10/vits", progress_bar=False).to(device)
 
 
 _tts_engine = None
@@ -196,12 +196,15 @@ def files_from_dir(dir_path) -> list:
     return es_files
 
 
-def _synthesize_raw(tts_engine, text: str, wav_path: str) -> bytes | None:
+def _synthesize_raw(tts_engine, text: str, wav_path: str, speaker_wav: str | None = None) -> bytes | None:
     """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure."""
     if not text or not text.strip():
         return None
     try:
-        tts_engine.tts_to_file(text=text, file_path=wav_path)
+        kwargs = {}
+        if speaker_wav:
+            kwargs["speaker_wav"] = speaker_wav
+        tts_engine.tts_to_file(text=text, file_path=wav_path, **kwargs)
         return pathlib.Path(wav_path).read_bytes()
     except Exception as exc:
         print(f"[tts] TTS failed for segment ({exc}), using silence")
@@ -395,7 +398,7 @@ def _compute_speech_offset(source_path: str) -> float:
     return yt_start - whisper_start
 
 
-def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=None):
+def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=None, speaker_wav=None, voice_map=None):
     """Read translated JSON with segment timestamps and produce a time-aligned WAV.
 
     Each segment is individually synthesized and time-stretched to match its
@@ -416,6 +419,13 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     print(f"generating {save_name}...", end="")
 
     segments = segments_from_file(source_path)
+
+    # De-overlap: ensure each segment starts no earlier than the previous one ends.
+    # YouTube captions commonly have overlapping windows which, without this fix,
+    # cause the assembled TTS audio to be much longer than the source video.
+    for i in range(1, len(segments)):
+        if segments[i]["start"] < segments[i - 1]["end"]:
+            segments[i]["start"] = segments[i - 1]["end"]
 
     if not segments:
         text = text_from_file(source_path)
@@ -456,6 +466,10 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
                     en_text = en_segs[i].get("text", "")
                 seg_text = _shorten_segment_text(en_text, seg["text"], target_sec)
 
+        seg_speaker_wav = speaker_wav
+        if voice_map and seg.get("speaker"):
+            seg_speaker_wav = voice_map.get(seg["speaker"], speaker_wav)
+
         seg_metas.append({
             "index": i,
             "text": seg_text,
@@ -464,6 +478,7 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
             "target_sec": target_sec,
             "stretch_factor": stretch_factor,
             "aligned_seg": aligned_seg,
+            "speaker_wav": seg_speaker_wav,
         })
 
     # ── Phase 1: GPU synthesis (concurrent) ───────────────────────────
@@ -475,13 +490,13 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     raw_wav_map: dict[int, bytes | None] = {}
 
     with tempfile.TemporaryDirectory() as synth_dir:
-        def _do_synth(idx: int, text: str) -> tuple[int, bytes | None]:
+        def _do_synth(idx: int, text: str, seg_speaker_wav: str | None = None) -> tuple[int, bytes | None]:
             wav_path = str(pathlib.Path(synth_dir) / f"seg_{idx}.wav")
-            return idx, _synthesize_raw(engine, text, wav_path)
+            return idx, _synthesize_raw(engine, text, wav_path, speaker_wav=seg_speaker_wav)
 
         with ThreadPoolExecutor(max_workers=_TTS_WORKERS) as pool:
             futures = {
-                pool.submit(_do_synth, m["index"], m["text"]): m["index"]
+                pool.submit(_do_synth, m["index"], m["text"], m.get("speaker_wav")): m["index"]
                 for m in seg_metas
             }
             for fut in as_completed(futures):
@@ -521,8 +536,12 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
             })
 
             if seg_audio is not None:
-                combined += seg_audio
-                cursor_ms += len(seg_audio)
+                end_ms = int((m["end"] + offset) * 1000)
+                max_ms = max(0, end_ms - cursor_ms)
+                if max_ms > 0:
+                    seg_audio = seg_audio[:max_ms]
+                    combined += seg_audio
+                    cursor_ms += len(seg_audio)
 
         save_path = pathlib.Path(output_path) / save_name
         combined.export(str(save_path), format="wav")
