@@ -1,6 +1,6 @@
 services:
-  # ── STT (Speech-to-Text) — GPU only ────────────────────────────────
-  whisper-gpu:
+  # ── STT (Speech-to-Text) — GPU ────────────────────────────────────
+  whisper:
     container_name: foreign-whispers-stt
     profiles: [nvidia]
     image: ghcr.io/speaches-ai/speaches:latest-cuda-12.6.3
@@ -28,7 +28,7 @@ services:
       - fw-network
 
   # ── TTS (Text-to-Speech) — Chatterbox on GPU ──────────────────────
-  chatterbox-gpu:
+  chatterbox:
     container_name: foreign-whispers-tts
     profiles: [nvidia]
     image: travisvn/chatterbox-tts-api:latest
@@ -50,13 +50,19 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://0.0.0.0:8020/v1/models"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
     networks:
       - fw-network
 
-  # ── API (CPU orchestrator) — all profiles ─────────────────────────
+  # ── API (CPU orchestrator) ─────────────────────────────────────────
   api:
     container_name: foreign-whispers-api
-    profiles: [nvidia, cpu]
+    profiles: [cpu]
     build:
       context: .
       dockerfile: Dockerfile
@@ -66,7 +72,7 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    command: ["uv", "run", "uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    command: ["uv", "run", "uvicorn", "api.src.main:app", "--host", "0.0.0.0", "--port", "8080", "--timeout-keep-alive", "300"]
     environment:
       - CHATTERBOX_API_URL=http://foreign-whispers-tts:8020
       - FW_WHISPER_API_URL=http://foreign-whispers-stt:8000
@@ -76,19 +82,17 @@ services:
       - ./pipeline_data:/app/pipeline_data
       - ./foreign_whispers:/app/foreign_whispers
       - ./api:/app/api
-      #- ./cookies.txt:/app/cookies.txt
     networks:
       - fw-network
-  # ── Frontend (Next.js) — all profiles ──────────────────────────────
-  
+
+  # ── Frontend (Next.js) ─────────────────────────────────────────────
   frontend:
     container_name: foreign-whispers-frontend
-    profiles: [nvidia, cpu]
+    profiles: [cpu]
     build:
       context: ./frontend
       dockerfile: Dockerfile
     restart: unless-stopped
-    # network_mode: host
     ports:
       - "8501:8501"
     environment:
@@ -105,7 +109,7 @@ services:
       start_period: 15s
 
 networks:
-  fw-network: 
+  fw-network:
     driver: bridge
 
 volumes:

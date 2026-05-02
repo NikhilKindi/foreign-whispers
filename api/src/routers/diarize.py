@@ -15,7 +15,6 @@ router = APIRouter(prefix="/api")
 
 _alignment_service = AlignmentService(settings=settings)
 
-
 @router.post("/diarize/{video_id}", response_model=DiarizeResponse)
 async def diarize_endpoint(video_id: str):
     """Run speaker diarization on a video's audio track.

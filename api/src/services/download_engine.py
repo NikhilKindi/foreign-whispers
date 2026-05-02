@@ -13,6 +13,8 @@ _COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "/app/cookies.txt")
 
 def _yt_dlp_opts(**extra):
     opts = {"quiet": True, "no_warnings": True}
+    if os.path.isfile(_COOKIES_FILE):
+        opts["cookiefile"] = _COOKIES_FILE
     opts.update(extra)
     return opts
     

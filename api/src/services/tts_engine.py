@@ -79,18 +79,16 @@ class ChatterboxClient:
         resp = requests.post(
             f"{self.base_url}/v1/audio/speech",
             json={"input": text, "response_format": "wav"},
-            timeout=(5, 60),
+            timeout=(10, 300),
         )
         resp.raise_for_status()
         return resp.content
 
     def _synthesize_with_voice(self, text: str, speaker_wav: str) -> bytes:
         """Call /v1/audio/speech/upload with a reference WAV for voice cloning."""
-        # Resolve the speaker WAV path — could be relative to speakers dir
         speakers_base = pathlib.Path(__file__).parent.parent.parent.parent / "pipeline_data" / "speakers"
         wav_path = speakers_base / speaker_wav
         if not wav_path.exists():
-            # Try as absolute path
             wav_path = pathlib.Path(speaker_wav)
         if not wav_path.exists():
             _logging.getLogger(__name__).warning(
@@ -103,7 +101,7 @@ class ChatterboxClient:
                 f"{self.base_url}/v1/audio/speech/upload",
                 data={"input": text, "response_format": "wav"},
                 files={"voice_file": (wav_path.name, f, "audio/wav")},
-                timeout=(5, 60),
+                timeout=(10, 300),
             )
         resp.raise_for_status()
         return resp.content
@@ -125,28 +123,36 @@ class ChatterboxClient:
         return chunks if chunks else [text]
 
 
+import time as _time
+
+_CHATTERBOX_RETRIES = int(os.getenv("FW_TTS_CONNECT_RETRIES", "6"))
+_CHATTERBOX_RETRY_DELAY = int(os.getenv("FW_TTS_CONNECT_DELAY", "10"))
+
+
 def _make_tts_engine():
-    """Create TTS engine: Chatterbox API client if server is reachable, else local Coqui.
+    """Create TTS engine: Chatterbox API client, retrying until the server is ready.
 
-    Tries Chatterbox with a real /v1/audio/speech test call
-    to ensure the model is fully loaded before committing.
+    Retries up to FW_TTS_CONNECT_RETRIES times (default 6, ~60s total) before
+    falling back to local Coqui TTS. This handles the Docker startup race where
+    the API container is ready before Chatterbox finishes loading models.
     """
-    try:
-        client = ChatterboxClient()
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
-            client.tts_to_file(text="prueba", file_path=tmp.name)
-        print(f"[tts] Using Chatterbox GPU server at {CHATTERBOX_API_URL}")
-        return client
-    except Exception as exc:
-        print(f"[tts] Chatterbox not available ({exc}), falling back to local Coqui")
+    for attempt in range(1, _CHATTERBOX_RETRIES + 1):
+        try:
+            client = ChatterboxClient()
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+                client.tts_to_file(text="prueba", file_path=tmp.name)
+            print(f"[tts] Using Chatterbox server at {CHATTERBOX_API_URL}")
+            return client
+        except Exception as exc:
+            if attempt < _CHATTERBOX_RETRIES:
+                print(f"[tts] Chatterbox not ready (attempt {attempt}/{_CHATTERBOX_RETRIES}: {exc}), retrying in {_CHATTERBOX_RETRY_DELAY}s...")
+                _time.sleep(_CHATTERBOX_RETRY_DELAY)
+            else:
+                print(f"[tts] Chatterbox not available after {_CHATTERBOX_RETRIES} attempts ({exc}), falling back to local Coqui")
 
-    # Fallback: local Coqui TTS (for dev/test without Docker)
     import functools
     import torch
     from TTS.api import TTS as CoquiTTS
-    # Coqui TTS checkpoints contain classes (RAdam, defaultdict, etc.) that
-    # PyTorch 2.6+ rejects with weights_only=True.  Monkey-patch torch.load
-    # to default to weights_only=False for these trusted model files.
     _original_torch_load = torch.load
     @functools.wraps(_original_torch_load)
     def _patched_load(*args, **kwargs):
