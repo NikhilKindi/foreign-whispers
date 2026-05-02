@@ -1,15 +1,17 @@
 import type { NextConfig } from "next";
 
+const API_URL = process.env.API_URL || "http://localhost:8080";
+
 const nextConfig: NextConfig = {
   output: "standalone",
   experimental: {
-    proxyTimeout: 600_000, // 10 minutes — TTS can take several minutes on CPU
+    proxyTimeout: 600_000,
   },
   async rewrites() {
     return [
       {
         source: "/api/:path*",
-        destination: `http://foreign-whispers-api:8080/api/:path*`,
+        destination: `${API_URL}/api/:path*`,
       },
     ];
   },
