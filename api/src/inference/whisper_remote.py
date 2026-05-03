@@ -23,12 +23,19 @@ class RemoteWhisperBackend(WhisperBackend):
         url = f"{self._api_url}/v1/audio/transcriptions"
         logger.info("Remote Whisper transcription: POST %s", url)
 
+        import mimetypes
+        mime = mimetypes.guess_type(audio_path)[0] or "application/octet-stream"
+        filename = audio_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+
         with open(audio_path, "rb") as f:
             response = requests.post(
                 url,
-                files={"file": (audio_path, f, "audio/wav")},
-                data={"response_format": "verbose_json"},
-                timeout=300,
+                files={"file": (filename, f, mime)},
+                data={
+                    "model": "Systran/faster-whisper-medium",
+                    "response_format": "verbose_json",
+                },
+                timeout=600,
             )
 
         response.raise_for_status()
