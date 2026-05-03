@@ -46,12 +46,21 @@ async def lifespan(app: FastAPI):
 
 
 def get_whisper_model(app):
-    """Lazy-load Whisper model on first use."""
+    """Lazy-load Whisper backend on first use.
+
+    Uses the remote speaches GPU container when whisper_api_url is configured,
+    otherwise falls back to local Whisper.
+    """
     if app.state._whisper_model is None:
-        logger.info("Loading Whisper model (%s)...", settings.whisper_model)
-        import whisper
-        app.state._whisper_model = whisper.load_model(settings.whisper_model)
-        logger.info("Whisper model loaded.")
+        if settings.whisper_api_url:
+            from api.src.inference.whisper_remote import RemoteWhisperBackend
+            app.state._whisper_model = RemoteWhisperBackend(settings.whisper_api_url)
+            logger.info("Using remote Whisper at %s", settings.whisper_api_url)
+        else:
+            logger.info("Loading local Whisper model (%s)...", settings.whisper_model)
+            import whisper
+            app.state._whisper_model = whisper.load_model(settings.whisper_model)
+            logger.info("Whisper model loaded.")
     return app.state._whisper_model
 
 

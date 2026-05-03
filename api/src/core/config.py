@@ -92,7 +92,7 @@ class Settings(BaseSettings):
 
     # External service URLs
     chatterbox_api_url: str = "http://localhost:8020"
-    whisper_api_url: str = "http://localhost:8000"
+    whisper_api_url: str = ""
 
     # HuggingFace token for pyannote speaker diarization model
     hf_token: str = ""
