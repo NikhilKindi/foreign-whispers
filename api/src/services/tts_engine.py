@@ -352,6 +352,7 @@ def _write_align_report(
     metrics: list,
     aligned: list,
     segment_details: list,
+    alignment_enabled: bool = True,
 ) -> None:
     """Write a {stem}.align.json sidecar with evaluation metrics and per-segment detail.
 
@@ -371,7 +372,7 @@ def _write_align_report(
             "total_cumulative_drift_s": 0.0,
         }
 
-    report = {**summary, "alignment_enabled": _ALIGNMENT_ENABLED, "segments": segment_details}
+    report = {**summary, "alignment_enabled": alignment_enabled, "segments": segment_details}
     sidecar_path = pathlib.Path(output_path) / f"{stem}.align.json"
     sidecar_path.write_text(json.dumps(report, indent=2))
 
@@ -432,6 +433,13 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     for i in range(1, len(segments)):
         if segments[i]["start"] < segments[i - 1]["end"]:
             segments[i]["start"] = segments[i - 1]["end"]
+
+    # Drop sub-threshold segments: YouTube auto-captions use 0.010s "rolling window"
+    # marker entries that appear between every real speech segment. These produce
+    # no usable audio (TTS generates 2-6s, crushed to 10ms) and cause half the
+    # audio to be missing. Skip any segment shorter than 0.3s.
+    _MIN_SEGMENT_SEC = 0.3
+    segments = [s for s in segments if (s["end"] - s["start"]) >= _MIN_SEGMENT_SEC]
 
     if not segments:
         text = text_from_file(source_path)
@@ -553,7 +561,7 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
         combined.export(str(save_path), format="wav")
 
     stem = pathlib.Path(source_path).stem
-    _write_align_report(str(output_path), stem, _metrics_list, _aligned_list, segment_details)
+    _write_align_report(str(output_path), stem, _metrics_list, _aligned_list, segment_details, use_alignment)
 
     print("success!")
     return None

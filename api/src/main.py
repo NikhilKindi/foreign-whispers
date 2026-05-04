@@ -1,6 +1,7 @@
 """Foreign Whispers FastAPI application."""
 
 import logging
+import urllib.error
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -20,6 +21,56 @@ async def lifespan(app: FastAPI):
     """
     app.state._whisper_model = None
     app.state._tts_model = None
+
+    # Pre-load the Whisper model in speaches so /v1/audio/transcriptions is ready.
+    # speaches v0.8.0+: first POST /v1/models/{id} to download, then POST /api/ps/{id} to load.
+    if settings.whisper_api_url:
+        import time as _time
+        import urllib.parse
+        import urllib.request
+        base = settings.whisper_api_url.rstrip("/")
+        model_id = urllib.parse.quote(settings.whisper_model, safe="")
+        download_url = f"{base}/v1/models/{model_id}"
+        load_url = f"{base}/api/ps/{model_id}"
+        delete_url = f"{base}/v1/models/{model_id}"
+
+        def _speaches_request(url: str, method: str, timeout: int = 30):
+            req = urllib.request.Request(url, data=b"", method=method)
+            return urllib.request.urlopen(req, timeout=timeout)
+
+        for attempt in range(1, 7):
+            try:
+                # Ensure model is downloaded (no-op if already present)
+                try:
+                    _speaches_request(download_url, "POST", timeout=300)
+                    logger.info("Whisper model '%s' downloaded in speaches.", settings.whisper_model)
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 500:
+                        # Broken model cache (v0.8.0 breaking change) — delete and re-download
+                        logger.warning("Broken model cache detected; deleting and re-downloading '%s'.", settings.whisper_model)
+                        try:
+                            _speaches_request(delete_url, "DELETE")
+                        except Exception:
+                            pass
+                        _speaches_request(download_url, "POST", timeout=300)
+                        logger.info("Whisper model '%s' re-downloaded.", settings.whisper_model)
+                # Load model into memory
+                try:
+                    _speaches_request(load_url, "POST")
+                    logger.info("Whisper model '%s' loaded in speaches.", settings.whisper_model)
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 409:
+                        logger.info("Whisper model '%s' already loaded in speaches.", settings.whisper_model)
+                    else:
+                        logger.warning("Speaches returned %s loading model.", exc.code)
+                break
+            except Exception as exc:
+                if attempt < 6:
+                    logger.info("Speaches not ready yet (attempt %s/6), retrying in 5s…", attempt)
+                    _time.sleep(5)
+                else:
+                    logger.warning("Could not pre-load Whisper model after 6 attempts: %s", exc)
+
     logger.info("Application ready (models will load on first use).")
 
     # Configure Logfire if a write token is available
@@ -54,8 +105,8 @@ def get_whisper_model(app):
     if app.state._whisper_model is None:
         if settings.whisper_api_url:
             from api.src.inference.whisper_remote import RemoteWhisperBackend
-            app.state._whisper_model = RemoteWhisperBackend(settings.whisper_api_url)
-            logger.info("Using remote Whisper at %s", settings.whisper_api_url)
+            app.state._whisper_model = RemoteWhisperBackend(settings.whisper_api_url, settings.whisper_model)
+            logger.info("Using remote Whisper at %s (model: %s)", settings.whisper_api_url, settings.whisper_model)
         else:
             logger.info("Loading local Whisper model (%s)...", settings.whisper_model)
             import whisper
@@ -65,12 +116,15 @@ def get_whisper_model(app):
 
 
 def get_tts_model(app):
-    """Lazy-load TTS model on first use."""
+    """Lazy-load TTS engine on first use.
+
+    Uses the Chatterbox GPU server (with retry + Coqui fallback) — same
+    engine that tts_engine.py uses internally via _get_tts_engine().
+    """
     if app.state._tts_model is None:
-        logger.info("Loading TTS model (%s)...", settings.tts_model_name)
-        from TTS.api import TTS
-        app.state._tts_model = TTS(model_name=settings.tts_model_name, progress_bar=False)
-        logger.info("TTS model loaded.")
+        from api.src.services.tts_engine import _get_tts_engine
+        app.state._tts_model = _get_tts_engine()
+        logger.info("TTS engine ready: %r", app.state._tts_model)
     return app.state._tts_model
 
 

@@ -56,5 +56,8 @@ class DownloadService:
             for line in caption_path.read_text().splitlines():
                 line = line.strip()
                 if line:
-                    segments.append(json.loads(line))
+                    try:
+                        segments.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
         return segments

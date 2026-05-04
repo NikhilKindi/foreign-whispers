@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 
 from api.src.core.config import settings
 from api.src.core.dependencies import resolve_title
+from api.src.main import get_tts_model
 from api.src.services.tts_service import TTSService
 from foreign_whispers.voice_resolution import resolve_speaker_wav
 
@@ -18,7 +19,7 @@ router = APIRouter(prefix="/api")
 
 async def _run_in_threadpool(executor, fn, *args, **kwargs):
     """Run a sync function in the default thread pool executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, functools.partial(fn, *args, **kwargs))
 
 
@@ -41,7 +42,7 @@ async def tts_endpoint(
 
     svc = TTSService(
         ui_dir=settings.data_dir,
-        tts_engine=None,
+        tts_engine=get_tts_model(request.app),
     )
 
     title = resolve_title(video_id)

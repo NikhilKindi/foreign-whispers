@@ -85,6 +85,40 @@ def download_caption(url, destination_folder, filename=None):
     print("Success!")
     return str(save_path)
 
+def parse_vtt_to_jsonl(vtt_text: str) -> str:
+    """Convert WebVTT caption text to the line-delimited JSON format the pipeline expects.
+
+    Each output line: {"text": "...", "start": float, "duration": float}
+    """
+    import re
+    time_re = re.compile(
+        r"(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})"
+    )
+    lines = vtt_text.splitlines()
+    segments = []
+    i = 0
+    while i < len(lines):
+        m = time_re.match(lines[i].strip())
+        if m:
+            h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(x) for x in m.groups())
+            start = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000
+            end = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000
+            i += 1
+            text_parts = []
+            while i < len(lines) and lines[i].strip():
+                # Strip WebVTT tags like <00:00:00.000><c>text</c>
+                clean = re.sub(r"<[^>]+>", "", lines[i]).strip()
+                if clean:
+                    text_parts.append(clean)
+                i += 1
+            text = " ".join(text_parts)
+            if text and end > start:
+                segments.append(json.dumps({"text": text, "start": start, "duration": round(end - start, 3)}))
+        else:
+            i += 1
+    return "\n".join(segments)
+
+
 if __name__ == '__main__':
     vid_urls = ["https://www.youtube.com/watch?v=G3Eup4mfJdA&list=PLI1yx5Z0Lrv77D_g1tvF9u3FVqnrNbCRL&index=1",
                 "https://www.youtube.com/watch?v=480OGItLZNo&list=PLI1yx5Z0Lrv77D_g1tvF9u3FVqnrNbCRL&index=2",

@@ -46,7 +46,18 @@ async def download_endpoint(body: DownloadRequest):
         _download_service.download_video(body.url, str(videos_dir), stem)
 
     if not caption_path.exists():
-        _download_service.download_caption(body.url, str(captions_dir), stem)
+        # Accept a pre-placed .vtt file (e.g. from yt-dlp on a local machine)
+        # and convert it to the pipeline's line-delimited JSON format.
+        vtt_candidates = [
+            captions_dir / f"{stem}.en.vtt",
+            captions_dir / f"{stem}.vtt",
+        ]
+        vtt_file = next((p for p in vtt_candidates if p.exists()), None)
+        if vtt_file:
+            from api.src.services.download_engine import parse_vtt_to_jsonl
+            caption_path.write_text(parse_vtt_to_jsonl(vtt_file.read_text()))
+        else:
+            _download_service.download_caption(body.url, str(captions_dir), stem)
 
     segments = _download_service.read_caption_segments(caption_path)
 
